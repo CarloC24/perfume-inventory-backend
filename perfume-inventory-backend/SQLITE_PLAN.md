@@ -118,7 +118,17 @@ table and the three schemas.
 #### `models.py`
 
 ```python
+import enum
+
 from sqlmodel import Field, SQLModel
+
+
+class Gender(str, enum.Enum):
+    """The only three values the gender column accepts."""
+
+    masculine = "masculine"
+    feminine = "feminine"
+    unisex = "unisex"
 
 
 class PerfumeBase(SQLModel):
@@ -129,6 +139,7 @@ class PerfumeBase(SQLModel):
     size_ml: int = Field(gt=0)
     quantity: int = Field(default=0, ge=0)
     price: float = Field(ge=0)
+    gender: Gender = Field(default=Gender.unisex, index=True)
 
 
 class Perfume(PerfumeBase, table=True):
@@ -155,15 +166,28 @@ class PerfumeUpdate(SQLModel):
     size_ml: int | None = Field(default=None, gt=0)
     quantity: int | None = Field(default=None, ge=0)
     price: float | None = Field(default=None, ge=0)
+    gender: Gender | None = None
 ```
+
+**Restricting a field to a fixed set of values.** `Gender` is a `str`-based
+`Enum`, which is how you say "only these three". Because it subclasses `str`,
+the value stores and serializes as plain text. FastAPI turns it into a dropdown
+in the docs page and rejects anything else with a 422 whose message lists the
+allowed values. Note this is enforced on `PerfumeCreate`, not on the table
+class; see the gotchas at the end for a database-level guarantee.
 
 **Why the split matters.** Returning the table class directly would leak any
 internal column you add later. Accepting it on POST would let clients choose
 their own IDs. Keeping `PerfumeUpdate` separate lets PATCH accept a body with
 only one field.
 
-**Validation is free.** `gt=0` and `ge=0` are checked by Pydantic before your
-endpoint runs. A negative `size_ml` gets a 422 response automatically.
+**Validation is free, but only on the non-table classes.** `gt=0` and `ge=0`
+are checked by Pydantic before your endpoint runs, so a negative `size_ml` gets
+a 422 response automatically. This works because the endpoint accepts
+`PerfumeCreate`, which is a plain schema. SQLModel skips validation entirely on
+`table=True` classes, so `Perfume(size_ml=-5)` constructed directly in your own
+code is accepted without complaint. Always take a Create/Update schema in the
+endpoint signature and never the table class.
 
 ---
 
@@ -524,6 +548,37 @@ git push
 - **PATCH must use `exclude_unset=True`.** Without it, `model_dump()` returns
   every field including the ones the client did not send, and they all come
   back as `None`, wiping the record.
+- **`table=True` models do not validate.** This is the biggest SQLModel
+  surprise. Constraints like `gt=0` on the `Perfume` table class are recorded
+  for the schema but never enforced when you build the object in Python. The
+  API is still safe because request bodies are parsed as `PerfumeCreate`, which
+  does validate. Scripts, seed data, and background jobs that build `Perfume`
+  directly are not protected.
+- **`Field(regex=...)` silently does nothing.** SQLModel accepts the argument
+  and never applies it, and it has no `pattern=` argument at all. For string
+  format rules, validate on the Create schema with a Pydantic field validator.
+- **Enum values are checked by Pydantic, not by SQLite.** The generated column
+  is a plain `VARCHAR`. A bad value still cannot reach it through the API, and
+  SQLAlchemy raises a `LookupError` on commit if you build a table object
+  directly, but raw SQL against the file is unchecked. To get a real database
+  `CHECK` constraint, declare the column yourself:
+
+  ```python
+  from sqlalchemy import Column, Enum as SAEnum
+
+  gender: Gender = Field(
+      default=Gender.unisex,
+      sa_column=Column(
+          SAEnum(Gender, native_enum=False, create_constraint=True,
+                 values_callable=lambda x: [i.value for i in x]),
+          nullable=False, index=True,
+      ),
+  )
+  ```
+
+  That emits `CHECK (gender IN ('masculine', 'feminine', 'unisex'))` in the
+  table definition. Adding it to an existing table needs a migration, since
+  `create_all` will not alter a table that already exists.
 - **SQLite allows one writer at a time.** Fine for a personal inventory or a
   small team. When that stops being true, changing `DATABASE_URL` to a Postgres
   URL moves you over with no endpoint changes.
