@@ -8,9 +8,9 @@ class Gender(str, enum.Enum):
 
 class PerfumeBase(SQLModel): 
     name: str = Field(index=True)
-    brand: str = Field(gt=0)
-    type: str = Field(gt=0)
-    gender: str = Field(gt=0)
+    brand: str = Field()
+    type: str = Field()
+    gender: str = Field()
     size: int = Field(default=0, ge=0)
     stock: int = Field(default=0, ge=0)
     price: float = Field(default=0.00, ge=0.00)
