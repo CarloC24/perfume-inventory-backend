@@ -26,7 +26,7 @@ class PerfumeCreate(PerfumeBase):
 
 
 class PerfumeRead(PerfumeBase):
-    id: int
+    id: str
 
 
 class PerfumeUpdate(SQLModel):
