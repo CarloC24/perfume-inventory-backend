@@ -13,3 +13,8 @@ dev = [
     "httpx2>=2.12.0",
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# Tests import main/models/database, which live at the project root.
+pythonpath = ["."]
+testpaths = ["tests"]

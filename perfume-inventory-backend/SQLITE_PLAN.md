@@ -221,9 +221,6 @@ def create_perfume(
     response: Response,
     session: Session = Depends(get_session),
 ):
-    # barcode is the natural key, so posting one that already exists updates
-    # that row instead of adding a duplicate. Retrying a dropped request is
-    # therefore safe: the second attempt lands on the row the first one wrote.
     statement = select(Perfume).where(Perfume.barcode == data.barcode)
     existing = session.exec(statement).first()
 
@@ -233,9 +230,6 @@ def create_perfume(
         try:
             session.commit()
         except IntegrityError:
-            # A concurrent request inserted this barcode between the SELECT
-            # above and this commit. The unique index caught it; fall through
-            # to the update below, which targets the row that request wrote.
             session.rollback()
             existing = session.exec(statement).one()
         else:
@@ -243,7 +237,7 @@ def create_perfume(
             return perfume
 
     response.status_code = status.HTTP_200_OK
-    existing.sqlmodel_update(data.model_dump())
+    existing.sqlmodel_update(data.model_dump(exclude_unset=True))
     session.add(existing)
     session.commit()
     session.refresh(existing)
@@ -352,10 +346,9 @@ request whose response was lost is therefore safe. Three things make it work:
   transaction, and only a fresh one can see the other request's committed row.
   `try/except/else` keeps the update written once instead of in both branches.
 
-Because the body replaces the row wholesale, a field the client omits falls
-back to its `PerfumeCreate` default rather than keeping the stored value. POST
-here means "this is the SKU as it should now read"; use PATCH to change one
-field and leave the rest alone.
+The merge uses `exclude_unset=True`, so a field the client omits keeps its
+stored value rather than falling back to its `PerfumeCreate` default. Only
+fields actually present in the body are written.
 
 **The pattern in every write endpoint** is `add`, `commit`, `refresh`. `add`
 stages the object, `commit` writes it to disk, and `refresh` reloads it so
