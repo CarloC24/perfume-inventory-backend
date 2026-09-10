@@ -25,7 +25,7 @@ depends_on: Union[str, Sequence[str], None] = None
 # written.
 perfume_table = sa.table(
     "perfume",
-    sa.column("id", sa.String),
+    sa.column("id", sa.Integer),
     sa.column("name", sa.String),
     sa.column("brand", sa.String),
     sa.column("type", sa.String),
@@ -37,11 +37,12 @@ perfume_table = sa.table(
     sa.column("barcode", sa.String),
 )
 
-# IDs are hard-coded rather than generated at runtime so that the migration is
+# IDs are hard-coded rather than left to the database so that the migration is
 # repeatable and downgrade() can delete exactly the rows upgrade() inserted.
+# They start at 1 so the rows line up with the ids SQLite would have assigned.
 SEED_ROWS = [
     {
-        "id": "30c77537-4788-4c21-b5c1-5c7b38a7d399",
+        "id": 1,
         "name": "Chanel Chance",
         "brand": "Chanel",
         "type": "Eau de Parfum",
@@ -53,7 +54,7 @@ SEED_ROWS = [
         "barcode": "3145891265478",
     },
     {
-        "id": "000b8753-1e80-4aa0-a7ae-03b4a920d771",
+        "id": 2,
         "name": "Dior Sauvage",
         "brand": "Dior",
         "type": "Eau de Toilette",
@@ -65,7 +66,7 @@ SEED_ROWS = [
         "barcode": "3348901250158",
     },
     {
-        "id": "180407ab-e802-43d3-a29a-5ae34cb07e7b",
+        "id": 3,
         "name": "Versace Dylan Blue",
         "brand": "Versace",
         "type": "Eau de Toilette",
@@ -77,7 +78,7 @@ SEED_ROWS = [
         "barcode": "8011003835521",
     },
     {
-        "id": "dc541389-b895-48d9-a1f8-a20c6332fc41",
+        "id": 4,
         "name": "YSL Libre",
         "brand": "YSL",
         "type": "Eau de Parfum",
@@ -89,7 +90,7 @@ SEED_ROWS = [
         "barcode": "3614272562481",
     },
     {
-        "id": "5129cea9-39d4-4726-b6bb-995a72f79ef5",
+        "id": 5,
         "name": "Bleu de Chanel",
         "brand": "Chanel",
         "type": "Eau de Parfum",

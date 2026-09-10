@@ -15,10 +15,14 @@ class PerfumeBase(SQLModel):
     stock: int = Field(default=0, ge=0)
     price: float = Field(default=0.00, ge=0.00)
     location: str = Field(default="Backroom")
-    barcode: str = Field(nullable=False)
+    # Unique: a barcode identifies one SKU, so it is the natural key POST
+    # uses to decide between creating a row and updating the existing one.
+    barcode: str = Field(unique=True, index=True)
 
 class Perfume(PerfumeBase, table=True):
-    id: str = Field(primary_key=True, index=True)
+    # INTEGER PRIMARY KEY is an alias for SQLite's rowid, so leaving this None on
+    # insert makes the database assign the next value.
+    id: int | None = Field(default=None, primary_key=True, index=True)
 
 
 class PerfumeCreate(PerfumeBase):
@@ -26,7 +30,7 @@ class PerfumeCreate(PerfumeBase):
 
 
 class PerfumeRead(PerfumeBase):
-    id: str
+    id: int
 
 
 class PerfumeUpdate(SQLModel):

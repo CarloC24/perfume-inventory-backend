@@ -33,12 +33,12 @@ perfume.db              created at runtime, git-ignored
 
 | Method and path             | Behavior                                                  |
 | --------------------------- | --------------------------------------------------------- |
-| `POST /perfumes`            | Validate body, insert, return 201 with the new record     |
+| `POST /perfumes`            | Insert and return 201, or update the row with that barcode and return 200 |
 | `GET /perfumes`             | List with optional `brand`, `q` name search, `offset`, `limit` |
 | `GET /perfumes/low-stock`   | Rows where `quantity` is below a `threshold` query param  |
 | `GET /perfumes/{id}`        | One row, or 404                                           |
 | `PATCH /perfumes/{id}`      | Partial update using only the fields the client sent      |
-| `DELETE /perfumes/{id}`     | Remove the row, return 204                                |
+| `DELETE /perfumes/{id}`     | Remove the row if present, return 204 either way          |
 
 ---
 
@@ -205,7 +205,8 @@ mkdir -p routers && touch routers/__init__.py
 #### `routers/perfumes.py`
 
 ```python
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from database import get_session
@@ -215,12 +216,38 @@ router = APIRouter(prefix="/perfumes", tags=["perfumes"])
 
 
 @router.post("", response_model=PerfumeRead, status_code=status.HTTP_201_CREATED)
-def create_perfume(data: PerfumeCreate, session: Session = Depends(get_session)):
-    perfume = Perfume.model_validate(data)
-    session.add(perfume)
+def create_perfume(
+    data: PerfumeCreate,
+    response: Response,
+    session: Session = Depends(get_session),
+):
+    # barcode is the natural key, so posting one that already exists updates
+    # that row instead of adding a duplicate. Retrying a dropped request is
+    # therefore safe: the second attempt lands on the row the first one wrote.
+    statement = select(Perfume).where(Perfume.barcode == data.barcode)
+    existing = session.exec(statement).first()
+
+    if existing is None:
+        perfume = Perfume.model_validate(data)
+        session.add(perfume)
+        try:
+            session.commit()
+        except IntegrityError:
+            # A concurrent request inserted this barcode between the SELECT
+            # above and this commit. The unique index caught it; fall through
+            # to the update below, which targets the row that request wrote.
+            session.rollback()
+            existing = session.exec(statement).one()
+        else:
+            session.refresh(perfume)  # load the id the database just assigned
+            return perfume
+
+    response.status_code = status.HTTP_200_OK
+    existing.sqlmodel_update(data.model_dump())
+    session.add(existing)
     session.commit()
-    session.refresh(perfume)  # load the id the database just assigned
-    return perfume
+    session.refresh(existing)
+    return existing
 
 
 @router.get("", response_model=list[PerfumeRead])
@@ -284,12 +311,51 @@ def update_perfume(
 
 @router.delete("/{perfume_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_perfume(perfume_id: int, session: Session = Depends(get_session)):
+    # A missing row is not an error here: DELETE is idempotent, so a client that
+    # retries after a dropped response gets the same 204 as the first attempt.
     perfume = session.get(Perfume, perfume_id)
-    if perfume is None:
-        raise HTTPException(status_code=404, detail="Perfume not found")
-    session.delete(perfume)
-    session.commit()
+    if perfume is not None:
+        session.delete(perfume)
+        session.commit()
+    return
 ```
+
+**DELETE answers 204 whether or not the row existed.** This is the one
+endpoint that does not 404 on a missing id, which makes it idempotent: a client
+whose connection drops mid-request can retry and get the same answer instead of
+a confusing 404 for work that already succeeded. The trade is that callers
+cannot tell "I deleted it" from "it was never there", so if a UI ever needs to
+warn on a mistyped id, that signal is gone and the endpoint should go back to
+raising 404. Note there is no `response_model` on this route: a 204 must not
+carry a body, so pairing it with a response model would make FastAPI try to
+serialize one and fail. The bare `return` is the same as falling off the end of
+the function; it is there to make "no body" look deliberate.
+
+**POST is idempotent on `barcode`.** A barcode identifies one SKU, so it is
+the natural key: posting a barcode that already exists overwrites that row and
+returns 200, and only a new barcode creates a row and returns 201. Retrying a
+request whose response was lost is therefore safe. Three things make it work:
+
+- **`unique=True` on the column**, not just a check in the handler. The
+  guarantee then holds for seed data, migrations, and raw SQL as well.
+- **`response.status_code`** set on the injected `Response`. The decorator's
+  `status_code` is only the default, so an endpoint that varies its status
+  declares the common case there and overrides it per request.
+- **Catching `IntegrityError`.** The `SELECT` and the `INSERT` are not atomic,
+  so a concurrent request with the same barcode can slip between them. This is
+  not a rare edge: FastAPI runs `def` endpoints in a threadpool, and under 16
+  simultaneous POSTs to one new barcode the fallback fired on roughly half of
+  them. The unique index is what actually prevents the duplicate; the handler
+  rolls back and falls through to the update, which then targets the row the
+  other request wrote. Checking first and trusting the check is the bug this
+  avoids. The `rollback()` is required: the failed flush poisons the
+  transaction, and only a fresh one can see the other request's committed row.
+  `try/except/else` keeps the update written once instead of in both branches.
+
+Because the body replaces the row wholesale, a field the client omits falls
+back to its `PerfumeCreate` default rather than keeping the stored value. POST
+here means "this is the SKU as it should now read"; use PATCH to change one
+field and leave the rest alone.
 
 **The pattern in every write endpoint** is `add`, `commit`, `refresh`. `add`
 stages the object, `commit` writes it to disk, and `refresh` reloads it so
@@ -432,11 +498,38 @@ def test_patch_only_changes_sent_fields(client: TestClient):
     assert body["price"] == 120.0  # untouched
 
 
+def test_post_is_idempotent(client: TestClient):
+    first = client.post("/perfumes", json=SAUVAGE)
+    assert first.status_code == 201
+    again = client.post("/perfumes", json=SAUVAGE)
+    assert again.status_code == 200
+    assert again.json()["id"] == first.json()["id"]
+    assert len(client.get("/perfumes").json()) == 1
+
+
+def test_post_same_barcode_overwrites(client: TestClient):
+    created = client.post("/perfumes", json=SAUVAGE).json()
+    response = client.post("/perfumes", json={**SAUVAGE, "price": 99.0})
+    assert response.status_code == 200
+    assert response.json()["id"] == created["id"]
+    assert response.json()["price"] == 99.0
+
+
 def test_delete_perfume(client: TestClient):
     created = client.post("/perfumes", json=SAUVAGE).json()
     response = client.delete(f"/perfumes/{created['id']}")
     assert response.status_code == 204
     assert client.get(f"/perfumes/{created['id']}").status_code == 404
+
+
+def test_delete_is_idempotent(client: TestClient):
+    created = client.post("/perfumes", json=SAUVAGE).json()
+    assert client.delete(f"/perfumes/{created['id']}").status_code == 204
+    # Same id a second time, and an id that never existed: both 204, no body.
+    assert client.delete(f"/perfumes/{created['id']}").status_code == 204
+    response = client.delete("/perfumes/999")
+    assert response.status_code == 204
+    assert response.text == ""
 ```
 
 Run them:
@@ -507,6 +600,8 @@ Delete and confirm it is gone:
 
 ```bash
 curl -i -X DELETE http://127.0.0.1:8000/perfumes/1     # HTTP 204, empty body
+curl -i -X DELETE http://127.0.0.1:8000/perfumes/1     # HTTP 204 again, already gone
+curl -i -X DELETE http://127.0.0.1:8000/perfumes/999   # HTTP 204, never existed
 curl http://127.0.0.1:8000/perfumes/1                  # {"detail":"Perfume not found"}
 curl -i http://127.0.0.1:8000/perfumes/abc             # HTTP 422, "abc" is not an int
 ```
@@ -723,6 +818,49 @@ cause. Drop the leftover, then fix the real error:
 ```bash
 sqlite3 perfume.db "DROP TABLE IF EXISTS _alembic_tmp_perfume;"
 ```
+
+### Downgrade before you edit a migration you have already applied
+
+While migrations are unshipped it is reasonable to edit them in place rather
+than stack a corrective revision on top. The order matters: run
+`alembic downgrade base` **first**, using the migration as it currently stands,
+then edit, then `alembic upgrade head`. Edit first and `downgrade()` runs
+against a database the new code does not describe, which fails in confusing
+ways, for example dropping an index the applied schema never created:
+
+```
+sqlite3.OperationalError: no such index: ix_perfume_barcode
+```
+
+The version table then still reads `head` while the schema on disk predates the
+edit. Recover by dropping what the migration owns and clearing the stamp, then
+upgrading from scratch:
+
+```bash
+sqlite3 perfume.db "DROP TABLE IF EXISTS perfume; DELETE FROM alembic_version;"
+uv run alembic upgrade head
+```
+
+### A failed migration can leave the schema ahead of the version table
+
+SQLite has non-transactional DDL, which Alembic tells you on every run: `Will
+assume non-transactional DDL`. If a revision creates a table and then fails
+later in the same `upgrade()`, the `CREATE TABLE` stays on disk while the
+`alembic_version` row rolls back. You are left with `alembic current` printing
+nothing while the tables plainly exist, and the next `upgrade` fails with
+"table already exists". `downgrade` cannot help, because Alembic does not
+believe anything is applied. Drop what the partial run created, then upgrade
+again:
+
+```bash
+sqlite3 perfume.db "DROP TABLE IF EXISTS perfume;"
+uv run alembic upgrade head
+```
+
+Keep this in mind when reading migration output: Alembic reports a failure as a
+Python traceback, so filtering the output through something like
+`grep -E "Running|ERROR"` hides the error and makes a half-applied migration
+look like it simply stopped early.
 
 ### Retire create_all once Alembic owns the schema
 
