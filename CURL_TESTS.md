@@ -7,7 +7,7 @@ self-contained: copy a single block and run it, or paste it into Postman via
 Start the server first:
 
 ```bash
-uv run fastapi dev main.py
+uv run fastapi dev src/main.py
 ```
 
 Everything below assumes `http://localhost:8000`. If you run on another port,

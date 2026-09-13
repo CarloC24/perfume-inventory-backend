@@ -6,6 +6,14 @@ from sqlalchemy import pool
 from alembic import context
 from sqlmodel import SQLModel
 
+from src.config import settings
+
+# Importing the table models registers them on SQLModel.metadata, which is what
+# `alembic revision --autogenerate` diffs the database against. Without this
+# import the metadata is empty and autogenerate would propose dropping
+# everything.
+from src.perfumes.models import Perfume  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -20,6 +28,10 @@ if config.config_file_name is not None:
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 target_metadata = SQLModel.metadata
+
+# One source of truth for the database URL: the app's settings, rather than a
+# second copy of it in alembic.ini.
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

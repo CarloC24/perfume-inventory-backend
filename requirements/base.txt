@@ -1,0 +1,7 @@
+# Runtime dependencies, shared by every environment.
+# Mirrors [project.dependencies] in pyproject.toml; uv.lock holds the exact
+# pinned versions used to build the environment.
+alembic>=1.19.2
+fastapi[standard]>=0.141.1
+pydantic-settings>=2.15.0
+sqlmodel>=0.0.42

@@ -1,0 +1,4 @@
+-r base.txt
+
+# Production-only additions go here. The base set is currently enough to serve
+# the app (`fastapi run src/main.py`).
