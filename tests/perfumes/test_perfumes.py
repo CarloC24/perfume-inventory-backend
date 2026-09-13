@@ -4,9 +4,6 @@ Each test gets a fresh in-memory database from the fixtures in conftest.py,
 so ordering never matters and perfume.db is never touched.
 """
 
-import pytest
-
-
 # --------------------------------------------------------------------------
 # GET /perfumes
 # --------------------------------------------------------------------------
@@ -163,6 +160,71 @@ def test_patch_404s_when_missing(client):
     assert response.status_code == 404
 
 
+def test_patch_rejects_negative_stock(client, sauvage):
+    # PerfumeUpdate carries the same ge=0 constraint as PerfumeBase, so this is
+    # rejected at validation, before anything is written.
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"stock": -5})
+    assert response.status_code == 422
+    assert client.get(f"/perfumes/{created['id']}").json()["stock"] == created["stock"]
+
+
+def test_patch_rejects_negative_price(client, sauvage):
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"price": -1})
+    assert response.status_code == 422
+
+
+def test_patch_rejects_negative_size(client, sauvage):
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"size": -1})
+    assert response.status_code == 422
+
+
+def test_patch_to_a_duplicate_barcode_is_a_client_error(client, sauvage, libre):
+    # Two rows cannot share a barcode. Naming one that is taken is the client's
+    # mistake, so it is a 409 rather than an unhandled IntegrityError.
+    client.post("/perfumes", json=sauvage)
+    second = client.post("/perfumes", json=libre).json()
+    response = client.patch(
+        f"/perfumes/{second['id']}", json={"barcode": sauvage["barcode"]}
+    )
+    assert response.status_code == 409
+
+
+def test_patch_to_a_duplicate_barcode_leaves_both_rows_untouched(
+    client, sauvage, libre
+):
+    # The failed write is rolled back, so neither row is left half-updated.
+    first = client.post("/perfumes", json=sauvage).json()
+    second = client.post("/perfumes", json=libre).json()
+    client.patch(
+        f"/perfumes/{second['id']}",
+        json={"barcode": sauvage["barcode"], "stock": 999},
+    )
+    assert client.get(f"/perfumes/{first['id']}").json() == first
+    assert client.get(f"/perfumes/{second['id']}").json() == second
+
+
+def test_patch_to_its_own_barcode_is_not_a_conflict(client, sauvage):
+    # The row already holds this barcode; re-sending it conflicts with nothing.
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(
+        f"/perfumes/{created['id']}",
+        json={"barcode": sauvage["barcode"], "stock": 7},
+    )
+    assert response.status_code == 200
+    assert response.json()["stock"] == 7
+
+
+def test_patch_accepts_the_gender_values_post_accepts(client, sauvage):
+    # gender is a str on both PerfumeBase and PerfumeUpdate, so PATCH takes the
+    # same display values POST does and the seed data already uses.
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"gender": "For Men"})
+    assert response.status_code == 200
+    assert response.json()["gender"] == "For Men"
+
 # --------------------------------------------------------------------------
 # DELETE /perfumes/{id}
 # --------------------------------------------------------------------------
@@ -183,50 +245,3 @@ def test_delete_is_idempotent(client, sauvage):
     # Same id again, and one that never existed: a missing row is not an error.
     assert client.delete(f"/perfumes/{created['id']}").status_code == 204
     assert client.delete("/perfumes/999").status_code == 204
-
-
-# --------------------------------------------------------------------------
-# Known PATCH bugs.
-#
-# These assert the behavior PATCH should have. They are xfail rather than
-# deleted so the suite records the gap; each will start passing on its own
-# once the underlying cause is fixed, and pytest reports XPASS to say so.
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    reason="PerfumeUpdate omits the ge=0 constraints that PerfumeBase declares, "
-    "so the write is accepted and committed, and only then does PerfumeRead "
-    "fail to serialize it -> 500 with a negative stock left in the database",
-    strict=True,
-)
-def test_patch_rejects_negative_stock(client, sauvage):
-    created = client.post("/perfumes", json=sauvage).json()
-    response = client.patch(f"/perfumes/{created['id']}", json={"stock": -5})
-    assert response.status_code == 422
-
-
-@pytest.mark.xfail(
-    reason="PATCH does not catch IntegrityError the way POST does, so moving a "
-    "barcode onto one that already exists surfaces as a 500",
-    strict=True,
-)
-def test_patch_to_a_duplicate_barcode_is_a_client_error(client, sauvage, libre):
-    client.post("/perfumes", json=sauvage)
-    second = client.post("/perfumes", json=libre).json()
-    response = client.patch(
-        f"/perfumes/{second['id']}", json={"barcode": sauvage["barcode"]}
-    )
-    assert response.status_code == 409
-
-
-@pytest.mark.xfail(
-    reason="PerfumeUpdate types gender as the Gender enum while PerfumeBase "
-    "types it as str, so PATCH rejects the very values POST accepts and the "
-    "seed data already uses",
-    strict=True,
-)
-def test_patch_accepts_the_gender_values_post_accepts(client, sauvage):
-    created = client.post("/perfumes", json=sauvage).json()
-    response = client.patch(f"/perfumes/{created['id']}", json={"gender": "For Men"})
-    assert response.status_code == 200

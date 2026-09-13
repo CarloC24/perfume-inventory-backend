@@ -3,7 +3,6 @@
 from sqlmodel import Field
 
 from src.models import CustomModel
-from src.perfumes.constants import Gender
 
 
 class PerfumeBase(CustomModel):
@@ -29,14 +28,20 @@ class PerfumeRead(PerfumeBase):
 
 
 class PerfumeUpdate(CustomModel):
-    """What PATCH accepts. Every field optional so clients send only what changed."""
+    """What PATCH accepts. Every field optional so clients send only what changed.
+
+    Types and constraints mirror PerfumeBase: anything PATCH accepts has to be
+    something the row could have been created with in the first place. Letting
+    the two drift means PATCH either waves through values POST rejects, or
+    rejects values POST accepts.
+    """
 
     name: str | None = None
     brand: str | None = None
     type: str | None = None
-    gender: Gender | None = None
-    size: int | None = None
-    stock: int | None = None
-    price: float | None = None
+    gender: str | None = None
+    size: int | None = Field(default=None, ge=0)
+    stock: int | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0.00)
     location: str | None = None
     barcode: str | None = None
