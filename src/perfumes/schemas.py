@@ -1,5 +1,6 @@
 """Pydantic models for the perfumes module: what the API accepts and returns."""
 
+from pydantic import model_validator
 from sqlmodel import Field
 
 from src.models import CustomModel
@@ -45,3 +46,22 @@ class PerfumeUpdate(CustomModel):
     price: float | None = Field(default=None, ge=0.00)
     location: str | None = None
     barcode: str | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_nulls(self) -> "PerfumeUpdate":
+        """None here means "not sent", never "store a null".
+
+        Every column behind these fields is NOT NULL, so an explicit null is a
+        value the row cannot hold. Without this it reaches the database and
+        comes back as a 500; omitting the field is how a client says "leave
+        this alone".
+        """
+        nulled = sorted(
+            field for field in self.model_fields_set if getattr(self, field) is None
+        )
+        if nulled:
+            raise ValueError(
+                "null is not an allowed value; omit a field to leave it "
+                f"unchanged: {', '.join(nulled)}"
+            )
+        return self

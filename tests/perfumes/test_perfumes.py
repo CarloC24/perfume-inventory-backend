@@ -4,6 +4,23 @@ Each test gets a fresh in-memory database from the fixtures in conftest.py,
 so ordering never matters and perfume.db is never touched.
 """
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from src.perfumes import service
+
+
+def create_rows(client, template, count):
+    """Create `count` rows differing only by name and barcode."""
+    return [
+        client.post(
+            "/perfumes",
+            json={**template, "name": f"Perfume {i}", "barcode": f"barcode-{i}"},
+        ).json()
+        for i in range(count)
+    ]
+
+
 # --------------------------------------------------------------------------
 # GET /perfumes
 # --------------------------------------------------------------------------
@@ -21,6 +38,57 @@ def test_list_returns_created_rows(client, sauvage, libre):
     response = client.get("/perfumes")
     assert response.status_code == 200
     assert [p["name"] for p in response.json()] == ["Dior Sauvage", "YSL Libre"]
+
+
+# --------------------------------------------------------------------------
+# GET /perfumes - pagination
+# --------------------------------------------------------------------------
+
+
+def test_list_returns_every_row_when_under_the_default_limit(client, sauvage, libre):
+    client.post("/perfumes", json=sauvage)
+    client.post("/perfumes", json=libre)
+    assert len(client.get("/perfumes").json()) == 2
+
+
+def test_list_applies_limit(client, sauvage):
+    rows = create_rows(client, sauvage, 5)
+    body = client.get("/perfumes?limit=2").json()
+    assert [p["id"] for p in body] == [r["id"] for r in rows[:2]]
+
+
+def test_list_applies_offset(client, sauvage):
+    rows = create_rows(client, sauvage, 5)
+    body = client.get("/perfumes?offset=3").json()
+    assert [p["id"] for p in body] == [r["id"] for r in rows[3:]]
+
+
+def test_list_windows_with_limit_and_offset_together(client, sauvage):
+    rows = create_rows(client, sauvage, 5)
+    body = client.get("/perfumes?limit=2&offset=1").json()
+    assert [p["id"] for p in body] == [r["id"] for r in rows[1:3]]
+
+
+def test_offset_past_the_end_is_empty(client, sauvage):
+    create_rows(client, sauvage, 3)
+    assert client.get("/perfumes?offset=10").json() == []
+
+
+def test_paginated_response_is_still_a_plain_array(client, sauvage):
+    # Pagination is query params only. The body stays a bare list rather than
+    # an envelope, so a client that ignores the params sees no change.
+    create_rows(client, sauvage, 3)
+    assert isinstance(client.get("/perfumes?limit=1").json(), list)
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1", "limit=abc"])
+def test_list_rejects_out_of_range_pagination(client, query):
+    assert client.get(f"/perfumes?{query}").status_code == 422
+
+
+def test_list_accepts_the_maximum_limit(client, sauvage):
+    create_rows(client, sauvage, 2)
+    assert client.get("/perfumes?limit=100").status_code == 200
 
 
 # --------------------------------------------------------------------------
@@ -108,6 +176,47 @@ def test_create_rejects_negative_price(client, sauvage):
 def test_create_rejects_a_missing_required_field(client, sauvage):
     response = client.post("/perfumes", json={k: v for k, v in sauvage.items() if k != "barcode"})
     assert response.status_code == 422
+
+
+def test_post_recovers_when_the_row_appears_mid_insert(
+    client, sauvage, monkeypatch
+):
+    """The race upsert_by_barcode is written for.
+
+    Another writer commits the same barcode between this request's lookup and
+    its own commit. The unique index turns that into an IntegrityError, which
+    the handler absorbs by updating the row the other writer created instead
+    of failing.
+    """
+    created = client.post("/perfumes", json=sauvage).json()
+
+    real_lookup = service.get_by_barcode
+    lookups = []
+
+    def stale_first_lookup(session, barcode):
+        # The first answer is the stale one a racing writer would have seen.
+        lookups.append(barcode)
+        return None if len(lookups) == 1 else real_lookup(session, barcode)
+
+    monkeypatch.setattr(service, "get_by_barcode", stale_first_lookup)
+
+    response = client.post("/perfumes", json={**sauvage, "stock": 42})
+    assert response.status_code == 200
+    assert response.json()["id"] == created["id"]
+    assert response.json()["stock"] == 42
+    assert len(client.get("/perfumes").json()) == 1
+
+
+def test_post_reraises_an_integrity_error_it_cannot_explain(
+    client, sauvage, monkeypatch
+):
+    # If the row still is not there after the rollback, the barcode was not
+    # what conflicted. That is a real fault, so it is raised rather than
+    # quietly reported as a successful update.
+    client.post("/perfumes", json=sauvage)
+    monkeypatch.setattr(service, "get_by_barcode", lambda session, barcode: None)
+    with pytest.raises(IntegrityError):
+        client.post("/perfumes", json=sauvage)
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +333,34 @@ def test_patch_accepts_the_gender_values_post_accepts(client, sauvage):
     response = client.patch(f"/perfumes/{created['id']}", json={"gender": "For Men"})
     assert response.status_code == 200
     assert response.json()["gender"] == "For Men"
+
+def test_patch_rejects_an_explicit_null(client, sauvage):
+    # Every column behind these fields is NOT NULL, so a null is a value the
+    # row cannot hold. It is rejected instead of reaching the database.
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"name": None})
+    assert response.status_code == 422
+    assert client.get(f"/perfumes/{created['id']}").json() == created
+
+
+def test_patch_names_every_field_sent_as_null(client, sauvage):
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(
+        f"/perfumes/{created['id']}", json={"brand": None, "stock": None}
+    )
+    assert response.status_code == 422
+    assert "brand, stock" in response.text
+
+
+def test_patch_omitting_a_field_is_how_you_leave_it_unchanged(client, sauvage):
+    # The counterpart to the two above: omission, not null, is the way to say
+    # "leave this alone", and it keeps working.
+    created = client.post("/perfumes", json=sauvage).json()
+    response = client.patch(f"/perfumes/{created['id']}", json={"stock": 1})
+    assert response.status_code == 200
+    assert response.json()["name"] == created["name"]
+    assert response.json()["stock"] == 1
+
 
 # --------------------------------------------------------------------------
 # DELETE /perfumes/{id}

@@ -3,12 +3,13 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
+from src import database
 from src.database import get_session
 from src.main import app
 
 
 @pytest.fixture(name="session")
-def session_fixture():
+def session_fixture(monkeypatch):
     # A fresh in-memory database per test, so nothing here can touch
     # perfume.db. StaticPool keeps one connection alive; without it each
     # checkout would get a new, empty in-memory database.
@@ -17,6 +18,10 @@ def session_fixture():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    # Overriding get_session is not enough on its own: the app's lifespan calls
+    # create_db_and_tables() on the module-level engine, which would otherwise
+    # open - and create - the configured database file during a test run.
+    monkeypatch.setattr(database, "engine", engine)
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
