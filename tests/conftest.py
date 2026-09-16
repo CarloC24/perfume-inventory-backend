@@ -25,6 +25,7 @@ def session_fixture(monkeypatch):
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
+        
 
 
 @pytest.fixture(name="client")
