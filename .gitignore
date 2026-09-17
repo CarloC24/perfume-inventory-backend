@@ -18,6 +18,9 @@ venv/
 .coverage
 htmlcov/
 
+# Claude-generated docs: kept locally, never committed
+claude-docs/
+
 # OS / editors
 .DS_Store
 .vscode/
