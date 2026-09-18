@@ -12,6 +12,12 @@ engine = create_engine(
 
 
 def create_db_and_tables() -> None:
+    """Create every table from the models, bypassing migrations.
+
+    For tests and throwaway local databases only. Do not call this at startup:
+    it leaves alembic_version unstamped, which breaks the next migration. Use
+    `alembic upgrade head` for anything whose data outlives the process.
+    """
     SQLModel.metadata.create_all(engine)
 
 

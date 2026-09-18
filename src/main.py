@@ -5,7 +5,6 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from src.config import settings
-from src.database import create_db_and_tables
 from src.perfumes.router import router as perfumes_router
 
 if Path(settings.LOGGING_CONFIG_FILE).is_file():
@@ -14,7 +13,14 @@ if Path(settings.LOGGING_CONFIG_FILE).is_file():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_db_and_tables()
+    """Startup and shutdown work.
+
+    Deliberately does not create tables. Alembic owns the schema, and a second
+    thing creating it means the two disagree: create_all() builds the tables
+    without stamping alembic_version, so the next `alembic upgrade head` finds
+    a table it is about to create and fails with "table perfume already
+    exists". Run migrations before starting the app.
+    """
     yield
 
 
